@@ -4,6 +4,8 @@
 ## Dependencies
 - ROS Noetic
 - Anaconda
+- image-classifiers `pip install image-classifiers`
+- efficientnet `pip install efficientnet`
 
 ## Installation
 - Create conda environment from environment.yml file `conda env create -f environment.yml`

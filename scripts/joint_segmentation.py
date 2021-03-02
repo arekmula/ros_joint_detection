@@ -4,6 +4,7 @@
 import sys
 import threading
 
+import cv2
 import numpy as np
 import tensorflow as tf
 from keras.models import load_model
@@ -15,6 +16,7 @@ from sensor_msgs.msg import Image, RegionOfInterest
 from std_msgs.msg import String, Header
 
 # ROS package specific imports
+from segmentation_models import get_preprocessing
 from segmentation_models.metrics import FScore
 from segmentation_models.losses import dice_loss
 
@@ -22,6 +24,9 @@ from segmentation_models.losses import dice_loss
 class JointSegmentator:
 
     def __init__(self, rgb_image_topic):
+        self.backbone = "efficientnetb0"
+        self.threshold = 0.5
+
         # Topic name of 640x480 image to subscribe
         self.rgb_image_topic = rgb_image_topic
 
@@ -36,9 +41,17 @@ class JointSegmentator:
         self.model = load_model(model_path, custom_objects={"f1-score": FScore, "dice_loss": dice_loss})
         print(self.model.summary())
 
+        # Preprocess image function according to backbone specific
+        self.preprocess_input = get_preprocessing(self.backbone)
+
         # Last input message and message lock
         self.last_msg = None
         self.msg_lock = threading.Lock()
+
+        # Should publish visualization image
+        self.should_publish_visualization = rospy.get_param("visualize_joint_prediction", True)
+        if self.should_publish_visualization:
+            self.vis_pub = rospy.Publisher("joint_visualization", Image, queue_size=1)
 
     def image_callback(self, data):
         rospy.logdebug("Get input image")
@@ -63,6 +76,19 @@ class JointSegmentator:
                     cv_image = self.cv_bridge.imgmsg_to_cv2(msg, "bgr8")
                 except CvBridgeError as e:
                     print(e)
+
+                # Preprocess image according to backbone specific
+                cv_image = self.preprocess_input(cv_image)
+
+                # Predict
+                prediction = self.model.predict(tf.expand_dims(cv_image, axis=0))[0]
+                # Convert image from 0-1 scale to 0-255
+                prediction = np.where(prediction > self.threshold, np.uint8(255), np.uint8(0))
+
+                # Publish visualization image
+                if self.should_publish_visualization:
+                    image_msg = self.cv_bridge.cv2_to_imgmsg(prediction, encoding="mono8")
+                    self.vis_pub.publish(image_msg)
 
 
 def main(args):
