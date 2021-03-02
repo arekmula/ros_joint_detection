@@ -4,11 +4,19 @@
 import sys
 import threading
 
+import numpy as np
+import tensorflow as tf
+from keras.models import load_model
+
 # ROS imports
 import rospy
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, RegionOfInterest
 from std_msgs.msg import String, Header
+
+# ROS package specific imports
+from segmentation_models.metrics import FScore
+from segmentation_models.losses import dice_loss
 
 
 class JointSegmentator:
@@ -22,6 +30,11 @@ class JointSegmentator:
         # self.prediction_pub = rospy.Publisher(joint_prediction_topic, None, queue_size=1)
 
         self.cv_bridge = CvBridge()
+
+        # Load trained weights
+        model_path = rospy.get_param("joint_seg_model", None)
+        self.model = load_model(model_path, custom_objects={"f1-score": FScore, "dice_loss": dice_loss})
+        print(self.model.summary())
 
         # Last input message and message lock
         self.last_msg = None
@@ -59,7 +72,7 @@ def main(args):
         print(rgb_image_topic)
 
     joint_segmentator = JointSegmentator(rgb_image_topic)
-    joint_segmentator.run()
+    joint_segmentator.run_inference()
 
 
 if __name__ == '__main__':
