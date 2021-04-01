@@ -109,6 +109,9 @@ class JointSegmentator:
             if self.are_all_inputs_ready():
                 self.run_inference()
 
+        # TODO: If there's no handler in the front mask skip it in merging, so the network doesn't generate false
+        #  positives
+
     def merge_to_single_mask(self, data: HandlerPrediction, class_to_merge: str = None):
         """
         Merge list of masks to one common mask
@@ -160,6 +163,25 @@ class JointSegmentator:
 
         return input_data
 
+    def post_process_prediction(self, img):
+        # 100, 50, 10
+        #
+        edges = cv2.Canny(img, 100, 200)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=50, maxLineGap=10)
+        img = np.zeros((480, 640), dtype=np.uint8)
+        if lines is not None:
+            print(len(lines))
+            for i in range(len(lines)):
+                for x1, y1, x2, y2 in lines[i]:
+                    img = cv2.line(img, (x1, y1), (x2, y2), 255, 1)
+        else:
+            print("No lines found")
+            return None
+
+        if self.should_publish_visualization:
+            image_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="mono8")
+            self.vis_pub.publish(image_msg)
+
     def run_inference(self):
 
         if self.model is not None:
@@ -169,9 +191,10 @@ class JointSegmentator:
             # Convert prediction mask from 0-1 scale to 0-255
             prediction = np.where(prediction > self.DETECTION_THRESHOLD, np.uint8(255), np.uint8(0))
 
-            if self.should_publish_visualization:
-                image_msg = self.cv_bridge.cv2_to_imgmsg(prediction, encoding="mono8")
-                self.vis_pub.publish(image_msg)
+            # Remove noise
+            prediction = cv2.morphologyEx(prediction, cv2.MORPH_OPEN, (3, 3))
+            # TODO: Post process the prediction with HoughLines
+            self.post_process_prediction(prediction)
 
         self.reset_all_inputs()
 
