@@ -24,6 +24,12 @@ from segmentation_models.losses import dice_loss
 
 class JointSegmentator:
     DETECTION_THRESHOLD = 0.5
+    IMAGE_WIDTH = 640
+    IMAGE_HEIGHT = 480
+    INPUT_CHANNELS = 3
+    GRAYSCALE_CHANNEL = 0
+    HANDLER_CHANNEL = 1
+    ROT_FRONT_CHANNEL = 2
 
     def __init__(self, rgb_image_topic):
         self.backbone = "efficientnetb0"
@@ -82,38 +88,42 @@ class JointSegmentator:
         if self.grayscale_image is None:
             rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
             self.grayscale_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)  # TODO: Check the conversion
+            self.grayscale_image = self.grayscale_image.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
                 self.run_inference()
 
-    def handler_mask_callback(self, data: HandlerPrediction):
+    def handler_mask_callback(self, data):
         if self.handler_mask is None:
-            handler_mask = self.merge_to_single_mask(data.masks)
+            handler_mask = self.merge_to_single_mask(data)
             self.handler_mask = handler_mask.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
                 self.run_inference()
 
-    def rot_front_mask_callback(self, data: FrontPrediction):
+    def rot_front_mask_callback(self, data):
         if self.rot_front_mask is None:
-
-            rot_front_mask = self.merge_to_single_mask(data.masks)
+            rot_front_mask = self.merge_to_single_mask(data, class_to_merge="rot_front")
             self.rot_front_mask = rot_front_mask.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
                 self.run_inference()
 
-    def merge_to_single_mask(self, masks: list):
+    def merge_to_single_mask(self, data: HandlerPrediction, class_to_merge: str = None):
         """
         Merge list of masks to one common mask
 
-        :param masks: list of masks
+        :param class_to_merge: class to merge. For example create mask only from rotational fronts
+        :param data: input class containing list of masks and list of class_names
         :return: one common mask
         """
 
-        single_mask = np.zeros((480, 640), dtype=np.uint8)
+        single_mask = np.zeros((self.IMAGE_HEIGHT, self.IMAGE_WIDTH), dtype=np.uint8)
 
-        for mask in masks:
+        for mask, class_name in zip(data.masks, data.class_names):
+            if class_to_merge is not None:
+                if class_name != class_to_merge:
+                    continue
             current_mask_cv2 = self.cv_bridge.imgmsg_to_cv2(mask, "mono8")
             single_mask += current_mask_cv2
 
@@ -133,12 +143,35 @@ class JointSegmentator:
         self.grayscale_image = None
         self.rot_front_mask = None
 
+    def prepare_input_data(self):
+        """
+        Prepares input data for model. Channels order based on model training:
+        1) Grayscale image
+        2) Handler mask
+        3) Rotational front mask
+
+        :return:
+        """
+        input_data = np.empty((self.IMAGE_HEIGHT, self.IMAGE_WIDTH, self.INPUT_CHANNELS), dtype=np.float32)
+
+        input_data[:, :, self.GRAYSCALE_CHANNEL] = self.grayscale_image
+        input_data[:, :, self.HANDLER_CHANNEL] = self.handler_mask
+        input_data[:, :, self.ROT_FRONT_CHANNEL] = self.rot_front_mask
+
+        return input_data
+
     def run_inference(self):
 
-        # # Predict
-        # prediction = self.model.predict(tf.expand_dims(None, axis=0))[0]
-        # # Convert image from 0-1 scale to 0-255
-        # prediction = np.where(prediction > self.DETECTION_THRESHOLD, np.uint8(255), np.uint8(0))
+        if self.model is not None:
+            input_data = self.prepare_input_data()
+            # Predict
+            prediction = self.model.predict(input_data[np.newaxis, :])[0]
+            # Convert prediction mask from 0-1 scale to 0-255
+            prediction = np.where(prediction > self.DETECTION_THRESHOLD, np.uint8(255), np.uint8(0))
+
+            if self.should_publish_visualization:
+                image_msg = self.cv_bridge.cv2_to_imgmsg(prediction, encoding="mono8")
+                self.vis_pub.publish(image_msg)
 
         self.reset_all_inputs()
 
