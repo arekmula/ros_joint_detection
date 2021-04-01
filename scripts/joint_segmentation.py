@@ -14,7 +14,7 @@ import rospy
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, RegionOfInterest
 from std_msgs.msg import String, Header
-from ros_joint_segmentation.msg import HandlerPrediction
+from ros_joint_segmentation.msg import HandlerPrediction, FrontPrediction
 
 # ROS package specific imports
 from segmentation_models import get_preprocessing
@@ -61,6 +61,10 @@ class JointSegmentator:
         self.handler_mask = None
 
         # rot_front mask
+        rot_front_sub = rospy.Subscriber("/front_prediction",
+                                         data_class=FrontPrediction,
+                                         callback=self.rot_front_mask_callback,
+                                         queue_size=1, buff_size=2 ** 24)
         self.rot_front_mask = None
 
         # Last input message and message lock
@@ -83,25 +87,38 @@ class JointSegmentator:
                 self.run_inference()
 
     def handler_mask_callback(self, data: HandlerPrediction):
-        print("received handler")
         if self.handler_mask is None:
-            handler_mask = np.zeros((480, 640), dtype=np.uint8)
-
-            for mask in data.masks:
-                mask_cv = self.cv_bridge.imgmsg_to_cv2(mask, "mono8")
-                handler_mask += mask_cv
-
-            print(np.max(handler_mask))
-            handler_mask[handler_mask >= 255] = 255  # prune the value to 255 if mask was greater than 255
-            # Publish visualization image
-            if self.should_publish_visualization:
-                image_msg = self.cv_bridge.cv2_to_imgmsg(handler_mask, encoding="mono8")
-                self.vis_pub.publish(image_msg)
-
+            handler_mask = self.merge_to_single_mask(data.masks)
             self.handler_mask = handler_mask.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
                 self.run_inference()
+
+    def rot_front_mask_callback(self, data: FrontPrediction):
+        if self.rot_front_mask is None:
+
+            rot_front_mask = self.merge_to_single_mask(data.masks)
+            self.rot_front_mask = rot_front_mask.astype(np.float32) / 255
+
+            if self.are_all_inputs_ready():
+                self.run_inference()
+
+    def merge_to_single_mask(self, masks: list):
+        """
+        Merge list of masks to one common mask
+
+        :param masks: list of masks
+        :return: one common mask
+        """
+
+        single_mask = np.zeros((480, 640), dtype=np.uint8)
+
+        for mask in masks:
+            current_mask_cv2 = self.cv_bridge.imgmsg_to_cv2(mask, "mono8")
+            single_mask += current_mask_cv2
+
+        single_mask[single_mask >= 255] = 255  # prune the value to 255 if mask was greater than 255
+        return single_mask
 
     def are_all_inputs_ready(self):
         if (self.grayscale_image is not None) and \
@@ -118,10 +135,10 @@ class JointSegmentator:
 
     def run_inference(self):
 
-        # Predict
-        prediction = self.model.predict(tf.expand_dims(None, axis=0))[0]
-        # Convert image from 0-1 scale to 0-255
-        prediction = np.where(prediction > self.DETECTION_THRESHOLD, np.uint8(255), np.uint8(0))
+        # # Predict
+        # prediction = self.model.predict(tf.expand_dims(None, axis=0))[0]
+        # # Convert image from 0-1 scale to 0-255
+        # prediction = np.where(prediction > self.DETECTION_THRESHOLD, np.uint8(255), np.uint8(0))
 
         self.reset_all_inputs()
 
