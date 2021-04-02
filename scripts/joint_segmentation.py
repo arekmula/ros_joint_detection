@@ -30,6 +30,7 @@ class JointSegmentator:
     GRAYSCALE_CHANNEL = 0
     HANDLER_CHANNEL = 1
     ROT_FRONT_CHANNEL = 2
+    MINIMUM_JOINT_PREDICTION_HEIGHT = 100
 
     def __init__(self, rgb_image_topic):
         self.backbone = "efficientnetb0"
@@ -58,6 +59,7 @@ class JointSegmentator:
         rgb_sub = rospy.Subscriber(self.rgb_image_topic, data_class=Image, callback=self.rgb_image_callback,
                                    queue_size=1, buff_size=2 ** 24)
         self.grayscale_image = None
+        self.rgb_image = None
 
         # handler mask
         handler_sub = rospy.Subscriber("/handler_prediction",
@@ -86,8 +88,8 @@ class JointSegmentator:
         rospy.logdebug("Get input image")
 
         if self.grayscale_image is None:
-            rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
-            self.grayscale_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)  # TODO: Check the conversion
+            self.rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
+            self.grayscale_image = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2GRAY)  # TODO: Check the conversion
             self.grayscale_image = self.grayscale_image.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
@@ -111,6 +113,7 @@ class JointSegmentator:
 
         # TODO: If there's no handler in the front mask skip it in merging, so the network doesn't generate false
         #  positives
+        # TODO: Or if there's no handler give some probability then?
 
     def merge_to_single_mask(self, data: HandlerPrediction, class_to_merge: str = None):
         """
@@ -163,27 +166,74 @@ class JointSegmentator:
 
         return input_data
 
+    def method_no_1(self, contours: np.ndarray):
+        """
+        Using found contours to find the corners of predicted joint
+
+        :param contours:
+        :return:
+        """
+
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+
+            if h < self.MINIMUM_JOINT_PREDICTION_HEIGHT:
+                continue
+
+            pts = contour.reshape(contour.shape[0], 2)
+            # top left point has smallest sum and bottom right has smallest sum
+            s = np.sum(pts, axis=1)
+            top_left = pts[np.argmin(s)]
+            bottom_right = pts[np.argmax(s)]
+            # top right has minimum difference and bottom left has maximum difference
+            diff = np.diff(pts, axis=1)
+            top_right = pts[np.argmin(diff)]
+            bottom_left = pts[np.argmax(diff)]
+
+            x_top = int((top_left[0] + top_right[0]) / 2)
+            y_top = int((top_left[1] + top_right[1]) / 2)
+
+            x_bot = int((bottom_left[0] + bottom_right[0]) / 2)
+            y_bot = int((bottom_left[1] + bottom_right[1]) / 2)
+
+            cv2.line(self.rgb_image, (x_top, y_top), (x_bot, y_bot), (255, 255, 0), 2)
+
+    def method_no_2(self, contours: np.ndarray):
+        """
+        Finds joint based on bounding box of contour
+
+        :param contours:
+        :return:
+        """
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+
+            if h < self.MINIMUM_JOINT_PREDICTION_HEIGHT:
+                continue
+
+            x = int(x + w/2)
+            cv2.line(self.rgb_image, (x, y), (x, y+h), (0, 255, 255), 2)
+
     def post_process_prediction(self, img):
-        # 100, 50, 10
-        #
-        edges = cv2.Canny(img, 100, 200)
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=50, maxLineGap=10)
-        img = np.zeros((480, 640), dtype=np.uint8)
-        if lines is not None:
-            print(len(lines))
-            for i in range(len(lines)):
-                for x1, y1, x2, y2 in lines[i]:
-                    img = cv2.line(img, (x1, y1), (x2, y2), 255, 1)
-        else:
-            print("No lines found")
-            return None
+        """
+        Post process the prediction to get better predictions
+
+        :param img:
+        :return:
+        """
+        img = cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=0)  # Blur the image
+        edges = cv2.Canny(img, 100, 200)  # Find edges on the image
+        # Find external contours on the image and gather or corners
+        contours, hierarchy = cv2.findContours(edges, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_NONE)
+
+        self.method_no_1(contours)
+        self.method_no_2(contours)
 
         if self.should_publish_visualization:
-            image_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="mono8")
+            image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
             self.vis_pub.publish(image_msg)
 
     def run_inference(self):
-
         if self.model is not None:
             input_data = self.prepare_input_data()
             # Predict
@@ -194,6 +244,7 @@ class JointSegmentator:
             # Remove noise
             prediction = cv2.morphologyEx(prediction, cv2.MORPH_OPEN, (3, 3))
             # TODO: Post process the prediction with HoughLines
+            # TODO: Find lines on original grayscale image and like compare prediction with those lines
             self.post_process_prediction(prediction)
 
         self.reset_all_inputs()
