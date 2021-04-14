@@ -54,6 +54,7 @@ add_message_files(
   FILES
   HandlerPrediction.msg
   FrontPrediction.msg
+  JointPrediction.msg
 )
 
 ## Generate services in the 'srv' folder

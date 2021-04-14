@@ -12,7 +12,7 @@ from keras.models import load_model
 import rospy
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
-from ros_joint_segmentation.msg import HandlerPrediction, FrontPrediction
+from ros_joint_segmentation.msg import HandlerPrediction, FrontPrediction, JointPrediction
 
 # ROS package specific imports
 from segmentation_models import get_preprocessing
@@ -45,7 +45,7 @@ class JointSegmentator:
 
         # Topic name where prediction will be published
         joint_prediction_topic = rospy.get_param("joint_prediction_topic", default="joint_prediction")
-        # self.prediction_pub = rospy.Publisher(joint_prediction_topic, None, queue_size=1)
+        self.prediction_pub = rospy.Publisher(joint_prediction_topic, JointPrediction, queue_size=1)
 
         self.cv_bridge = CvBridge()
 
@@ -66,6 +66,7 @@ class JointSegmentator:
         self.grayscale_image = None
         self.grayscale_image_cv2 = None
         self.rgb_image = None
+        self.header = None
 
         # handler mask
         handler_sub = rospy.Subscriber("/handler_prediction",
@@ -96,6 +97,7 @@ class JointSegmentator:
         rospy.logdebug("Get input image")
 
         if self.grayscale_image is None:
+            self.header = data.header
             self.rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
             self.grayscale_image_cv2 = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2GRAY)
             self.grayscale_image = self.grayscale_image_cv2.astype(np.float32) / 255
@@ -204,6 +206,7 @@ class JointSegmentator:
         self.handler_mask = None
         self.rot_front_data = None
         self.rot_front_mask = None
+        self.header = None
 
     def prepare_input_data(self):
         """
@@ -277,17 +280,30 @@ class JointSegmentator:
         # For each middle point from prediction get distance to each line and find index of closest one
         closest_line_indexes = get_closest_lines_indexes(prediction_middle_points, grayscale_line_coeffs)
 
-        for line_index in closest_line_indexes:
-            vertices_to_draw = grayscale_vertices[line_index]
-            cv2.line(self.rgb_image, (vertices_to_draw[0], vertices_to_draw[1]),
-                     (vertices_to_draw[2], vertices_to_draw[3]),
-                     (0, 255, 255), 3)
-        # self.method_no_1(contours)
-        # self.method_no_2(contours)
-
         if self.should_publish_visualization:
+            for line_index in closest_line_indexes:
+                vertices_to_draw = grayscale_vertices[line_index]
+                cv2.line(self.rgb_image, (vertices_to_draw[0], vertices_to_draw[1]),
+                         (vertices_to_draw[2], vertices_to_draw[3]),
+                         (0, 255, 255), 3)
+
             image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
             self.vis_pub.publish(image_msg)
+
+        self.publish_prediction(closest_line_indexes, grayscale_vertices)
+
+    def publish_prediction(self, closest_line_indexes, vertices):
+        prediction_msg = JointPrediction()
+        prediction_msg.header = self.header
+
+        for line_index in closest_line_indexes:
+            x1, y1, x2, y2 = vertices[line_index]
+            prediction_msg.x1.append(x1)
+            prediction_msg.y1.append(y1)
+            prediction_msg.x2.append(x2)
+            prediction_msg.y2.append(y2)
+
+        self.prediction_pub.publish(prediction_msg)
 
     def run_inference(self):
         if self.model is not None:
@@ -299,8 +315,7 @@ class JointSegmentator:
 
             # Remove noise
             prediction = cv2.morphologyEx(prediction, cv2.MORPH_OPEN, (3, 3))
-            # TODO: Post process the prediction with HoughLines
-            # TODO: Find lines on original grayscale image and like compare prediction with those lines
+
             self.post_process_prediction(prediction)
 
         self.reset_all_inputs()
