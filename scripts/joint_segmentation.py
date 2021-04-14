@@ -6,20 +6,20 @@ import threading
 
 import cv2
 import numpy as np
-import tensorflow as tf
 from keras.models import load_model
 
 # ROS imports
 import rospy
-from cv_bridge import CvBridge, CvBridgeError
-from sensor_msgs.msg import Image, RegionOfInterest
-from std_msgs.msg import String, Header
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image
 from ros_joint_segmentation.msg import HandlerPrediction, FrontPrediction
 
 # ROS package specific imports
 from segmentation_models import get_preprocessing
 from segmentation_models.metrics import FScore
 from segmentation_models.losses import dice_loss
+from postprocessing_helpers.line_operations import find_vertices_of_prediction_joints, get_middle_point_of_lines,\
+    get_general_line_coeffs, get_closest_lines_indexes
 
 
 class JointSegmentator:
@@ -30,7 +30,12 @@ class JointSegmentator:
     GRAYSCALE_CHANNEL = 0
     HANDLER_CHANNEL = 1
     ROT_FRONT_CHANNEL = 2
-    MINIMUM_JOINT_PREDICTION_HEIGHT = 100
+    CANNY_THRESHOLD1 = 47
+    CANNY_THRESHOLD2 = 255
+    HOUGH_THRESHOLD = 150
+    HOUGH_MIN_LINE_LENGTH = 30
+    HOUGH_MAX_LINE_GAP = 18
+    ROT_JOINT_90ANGLE_TILT = 10
 
     def __init__(self, rgb_image_topic):
         self.backbone = "efficientnetb0"
@@ -59,6 +64,7 @@ class JointSegmentator:
         rgb_sub = rospy.Subscriber(self.rgb_image_topic, data_class=Image, callback=self.rgb_image_callback,
                                    queue_size=1, buff_size=2 ** 24)
         self.grayscale_image = None
+        self.grayscale_image_cv2 = None
         self.rgb_image = None
 
         # handler mask
@@ -67,6 +73,7 @@ class JointSegmentator:
                                        callback=self.handler_mask_callback,
                                        queue_size=1, buff_size=2 ** 24)
         self.handler_mask = None
+        self.handler_data: HandlerPrediction = None
 
         # rot_front mask
         rot_front_sub = rospy.Subscriber("/front_prediction",
@@ -74,6 +81,7 @@ class JointSegmentator:
                                          callback=self.rot_front_mask_callback,
                                          queue_size=1, buff_size=2 ** 24)
         self.rot_front_mask = None
+        self.rot_front_data: FrontPrediction = None
 
         # Last input message and message lock
         self.last_msg = None
@@ -89,31 +97,76 @@ class JointSegmentator:
 
         if self.grayscale_image is None:
             self.rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
-            self.grayscale_image = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2GRAY)  # TODO: Check the conversion
-            self.grayscale_image = self.grayscale_image.astype(np.float32) / 255
+            self.grayscale_image_cv2 = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2GRAY)
+            self.grayscale_image = self.grayscale_image_cv2.astype(np.float32) / 255
 
             if self.are_all_inputs_ready():
+                self.delete_rot_front_without_handler()
                 self.run_inference()
 
-    def handler_mask_callback(self, data):
-        if self.handler_mask is None:
-            handler_mask = self.merge_to_single_mask(data)
-            self.handler_mask = handler_mask.astype(np.float32) / 255
+    def handler_mask_callback(self, data: HandlerPrediction):
+        if self.handler_data is None:
+            self.handler_data = data
 
             if self.are_all_inputs_ready():
+                self.delete_rot_front_without_handler()
                 self.run_inference()
 
-    def rot_front_mask_callback(self, data):
-        if self.rot_front_mask is None:
-            rot_front_mask = self.merge_to_single_mask(data, class_to_merge="rot_front")
-            self.rot_front_mask = rot_front_mask.astype(np.float32) / 255
+    def rot_front_mask_callback(self, data: FrontPrediction):
+        if self.rot_front_data is None:
+            self.rot_front_data = data
 
             if self.are_all_inputs_ready():
+                self.delete_rot_front_without_handler()
                 self.run_inference()
 
-        # TODO: If there's no handler in the front mask skip it in merging, so the network doesn't generate false
-        #  positives
         # TODO: Or if there's no handler give some probability then?
+
+    def delete_rot_front_without_handler(self):
+        """
+        Deletes rotational fronts that has no detected handlers in it.
+
+        :return:
+        """
+        rot_front_data = self.rot_front_data
+        prediction_indexes_to_delete = []
+
+        for prediction_index, rot_front_box in enumerate(self.rot_front_data.boxes):
+            rot_front_has_handler = False
+
+            for handler_box in self.handler_data.boxes:
+                handler_x = (handler_box.x_offset + handler_box.x_offset + handler_box.width) / 2
+                handler_y = (handler_box.y_offset + handler_box.y_offset + handler_box.height) / 2
+                # Check if handler box is in rotation front
+                if ((handler_x >= rot_front_box.x_offset)
+                        and handler_x <= (rot_front_box.x_offset + rot_front_box.width)
+                        and (handler_y >= rot_front_box.y_offset)
+                        and handler_y <= (rot_front_box.y_offset + rot_front_box.height)):
+                    rot_front_has_handler = True
+                    break
+
+            if not rot_front_has_handler:
+                # If rot front has no handler skip this rotational front prediction
+                prediction_indexes_to_delete.append(prediction_index)
+
+        for prediction_index in sorted(prediction_indexes_to_delete, reverse=True):
+            # Delete prediction with no handler
+            rot_front_data.boxes.pop(prediction_index)
+            rot_front_data.class_names.pop(prediction_index)
+            rot_front_data.masks.pop(prediction_index)
+
+            try:
+                rot_front_data.class_ids.pop(prediction_index)
+            except AttributeError as e:
+                rot_front_data.class_ids = list(rot_front_data.class_ids)
+                rot_front_data.class_ids.pop(prediction_index)
+            try:
+                rot_front_data.scores.pop(prediction_index)
+            except AttributeError as e:
+                rot_front_data.scores = list(rot_front_data.scores)
+                rot_front_data.scores.pop(prediction_index)
+
+        self.rot_front_data = rot_front_data
 
     def merge_to_single_mask(self, data: HandlerPrediction, class_to_merge: str = None):
         """
@@ -138,15 +191,18 @@ class JointSegmentator:
 
     def are_all_inputs_ready(self):
         if (self.grayscale_image is not None) and \
-                (self.handler_mask is not None) and \
-                (self.rot_front_mask is not None):
+                (self.handler_data is not None) and \
+                (self.rot_front_data is not None):
             return True
         else:
             return False
 
     def reset_all_inputs(self):
-        self.handler_mask = None
         self.grayscale_image = None
+        self.grayscale_image_cv2 = None
+        self.handler_data = None
+        self.handler_mask = None
+        self.rot_front_data = None
         self.rot_front_mask = None
 
     def prepare_input_data(self):
@@ -158,6 +214,12 @@ class JointSegmentator:
 
         :return:
         """
+        rot_front_mask = self.merge_to_single_mask(self.rot_front_data, class_to_merge="rot_front")
+        self.rot_front_mask = rot_front_mask.astype(np.float32) / 255
+
+        handler_mask = self.merge_to_single_mask(self.handler_data)
+        self.handler_mask = handler_mask.astype(np.float32) / 255
+
         input_data = np.empty((self.IMAGE_HEIGHT, self.IMAGE_WIDTH, self.INPUT_CHANNELS), dtype=np.float32)
 
         input_data[:, :, self.GRAYSCALE_CHANNEL] = self.grayscale_image
@@ -166,53 +228,27 @@ class JointSegmentator:
 
         return input_data
 
-    def method_no_1(self, contours: np.ndarray):
+    def find_lines_on_grayscale_image(self):
         """
-        Using found contours to find the corners of predicted joint
+        Finds vertical lines on input grayscale image.
 
-        :param contours:
-        :return:
+        :return: List of tuples containing top and bottom vertices of vertical lines. Tuple has vertices in following
+         order x1, y1, x2, y2
         """
+        edges = cv2.Canny(self.grayscale_image_cv2, threshold1=self.CANNY_THRESHOLD1, threshold2=self.CANNY_THRESHOLD2)
+        linesP = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=self.HOUGH_THRESHOLD,
+                                 minLineLength=self.HOUGH_MIN_LINE_LENGTH, maxLineGap=self.HOUGH_MAX_LINE_GAP)
 
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-
-            if h < self.MINIMUM_JOINT_PREDICTION_HEIGHT:
-                continue
-
-            pts = contour.reshape(contour.shape[0], 2)
-            # top left point has smallest sum and bottom right has smallest sum
-            s = np.sum(pts, axis=1)
-            top_left = pts[np.argmin(s)]
-            bottom_right = pts[np.argmax(s)]
-            # top right has minimum difference and bottom left has maximum difference
-            diff = np.diff(pts, axis=1)
-            top_right = pts[np.argmin(diff)]
-            bottom_left = pts[np.argmax(diff)]
-
-            x_top = int((top_left[0] + top_right[0]) / 2)
-            y_top = int((top_left[1] + top_right[1]) / 2)
-
-            x_bot = int((bottom_left[0] + bottom_right[0]) / 2)
-            y_bot = int((bottom_left[1] + bottom_right[1]) / 2)
-
-            cv2.line(self.rgb_image, (x_top, y_top), (x_bot, y_bot), (255, 255, 0), 2)
-
-    def method_no_2(self, contours: np.ndarray):
-        """
-        Finds joint based on bounding box of contour
-
-        :param contours:
-        :return:
-        """
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-
-            if h < self.MINIMUM_JOINT_PREDICTION_HEIGHT:
-                continue
-
-            x = int(x + w/2)
-            cv2.line(self.rgb_image, (x, y), (x, y+h), (0, 255, 255), 2)
+        lines_vertices_list = []  # List of vertices for each line
+        if linesP is not None:
+            for i in range(0, len(linesP)):
+                x1, y1, x2, y2 = linesP[i][0]
+                angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
+                if (np.abs(angle) > (90 + self.ROT_JOINT_90ANGLE_TILT)) or\
+                        (np.abs(angle) < (90 - self.ROT_JOINT_90ANGLE_TILT)):
+                    continue  # Skip lines that are not vertical
+                lines_vertices_list.append((x1, y1, x2, y2))
+        return lines_vertices_list
 
     def post_process_prediction(self, img):
         """
@@ -221,13 +257,33 @@ class JointSegmentator:
         :param img:
         :return:
         """
-        img = cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=0)  # Blur the image
-        edges = cv2.Canny(img, 100, 200)  # Find edges on the image
-        # Find external contours on the image and gather or corners
-        contours, hierarchy = cv2.findContours(edges, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_NONE)
+        prediction_mask = cv2.GaussianBlur(img, ksize=(5, 5), sigmaX=0)  # Blur the prediction mask
+        # Find edges on the image
+        prediction_edges = cv2.Canny(prediction_mask, threshold1=self.CANNY_THRESHOLD1,
+                                     threshold2=self.CANNY_THRESHOLD2)
+        # Find vertices of prediction joints based on canny edge
+        prediction_vertices = find_vertices_of_prediction_joints(prediction_edges)
+        # Find middle point of predicted joint
+        prediction_middle_points = get_middle_point_of_lines(prediction_vertices)
 
-        self.method_no_1(contours)
-        self.method_no_2(contours)
+        # Find vertices on grayscale img
+        grayscale_vertices = self.find_lines_on_grayscale_image()
+        # Find general line coeffs of grayscale lines
+        grayscale_line_coeffs = []
+        for vertice in grayscale_vertices:
+            coeffs_vertices = get_general_line_coeffs(vertice[0], vertice[1], vertice[2], vertice[3])
+            grayscale_line_coeffs.append(coeffs_vertices)
+
+        # For each middle point from prediction get distance to each line and find index of closest one
+        closest_line_indexes = get_closest_lines_indexes(prediction_middle_points, grayscale_line_coeffs)
+
+        for line_index in closest_line_indexes:
+            vertices_to_draw = grayscale_vertices[line_index]
+            cv2.line(self.rgb_image, (vertices_to_draw[0], vertices_to_draw[1]),
+                     (vertices_to_draw[2], vertices_to_draw[3]),
+                     (0, 255, 255), 3)
+        # self.method_no_1(contours)
+        # self.method_no_2(contours)
 
         if self.should_publish_visualization:
             image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
