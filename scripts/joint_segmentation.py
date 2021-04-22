@@ -19,7 +19,7 @@ from ros_joint_segmentation.msg import HandlerPrediction, FrontPrediction, Joint
 from segmentation_models import get_preprocessing
 from segmentation_models.metrics import FScore
 from segmentation_models.losses import dice_loss
-from postprocessing_helpers.line_operations import find_vertices_of_prediction_joints, get_middle_point_of_lines,\
+from postprocessing_helpers.helpers import find_vertices_of_prediction_joints, get_middle_point_of_lines,\
     get_general_line_coeffs, get_closest_lines_indexes, get_point_on_opposite_edge_of_handler, get_point_line_distance
 
 
