@@ -36,6 +36,12 @@ def find_vertices_of_prediction_joints(prediction_edges, minimum_joint_predictio
 
 
 def find_corners_in_points(pts: np.ndarray):
+    """
+    Finds corners in input vertices
+
+    :param pts: list of vertices
+    :return: top_left, bottom_left, top_right, bottom_right vertices
+    """
     s = np.sum(pts, axis=1)
     top_left = pts[np.argmin(s)]  # Top left corner has minimum sum
     bottom_right = pts[np.argmax(s)]  # Bottom right corner has maximum sum
@@ -137,11 +143,20 @@ def point_to_point_distance(x1, y1, x2, y2):
 
 
 def get_point_on_opposite_edge_of_handler(front_bbox: np.ndarray, handler_bbox):
+    """
+    Finds point vertex that lands on the edge that is in the opposite side to the handler
 
+    :param front_bbox: Bounding box of front
+    :param handler_bbox: Bounding box of handler
+    :return:
+    """
+
+    # Get middle point of handler bounding box
     handler_middle_pt_x = int(handler_bbox.x_offset + (handler_bbox.width / 2))
     handler_middle_pt_y = int(handler_bbox.y_offset + (handler_bbox.height / 2))
 
     # TODO: Try to get middle points of edges from masks not bboxes
+    # Get middle points of left and right edge of front
     front_left_middle_point_x = front_bbox.x_offset
     front_left_middle_point_y = int(front_bbox.y_offset + (front_bbox.height / 2))
 

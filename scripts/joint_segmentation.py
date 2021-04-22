@@ -3,6 +3,7 @@
 # System imports
 import sys
 import threading
+from operator import itemgetter
 
 import cv2
 import numpy as np
@@ -19,7 +20,7 @@ from segmentation_models import get_preprocessing
 from segmentation_models.metrics import FScore
 from segmentation_models.losses import dice_loss
 from postprocessing_helpers.line_operations import find_vertices_of_prediction_joints, get_middle_point_of_lines,\
-    get_general_line_coeffs, get_closest_lines_indexes
+    get_general_line_coeffs, get_closest_lines_indexes, get_point_on_opposite_edge_of_handler, get_point_line_distance
 
 
 class JointSegmentator:
@@ -84,6 +85,10 @@ class JointSegmentator:
         self.rot_front_mask = None
         self.rot_front_data: FrontPrediction = None
 
+        self.rot_front_bboxes = []  # List of bounding boxes of rotational fronts
+        self.rot_front_info_list = []  # List of dictionaries corresponding to above bounding boxes lists. Each
+        # dictionary have info about index of handler in rotational front and index of rotational front prediction
+
         # Last input message and message lock
         self.last_msg = None
         self.msg_lock = threading.Lock()
@@ -127,6 +132,7 @@ class JointSegmentator:
     def delete_rot_front_without_handler(self):
         """
         Deletes rotational fronts that has no detected handlers in it.
+        Saves corresponding handler index for each rotational front
 
         :return:
         """
@@ -134,9 +140,11 @@ class JointSegmentator:
         prediction_indexes_to_delete = []
 
         for prediction_index, rot_front_box in enumerate(self.rot_front_data.boxes):
+
+            prediction_dictionary = {}
             rot_front_has_handler = False
 
-            for handler_box in self.handler_data.boxes:
+            for handler_idx, handler_box in enumerate(self.handler_data.boxes):
                 handler_x = (handler_box.x_offset + handler_box.x_offset + handler_box.width) / 2
                 handler_y = (handler_box.y_offset + handler_box.y_offset + handler_box.height) / 2
                 # Check if handler box is in rotation front
@@ -145,11 +153,18 @@ class JointSegmentator:
                         and (handler_y >= rot_front_box.y_offset)
                         and handler_y <= (rot_front_box.y_offset + rot_front_box.height)):
                     rot_front_has_handler = True
+                    # Save index of handler corresponding to the rotational front
+                    prediction_dictionary["handler_index"] = handler_idx
                     break
 
             if not rot_front_has_handler:
                 # If rot front has no handler skip this rotational front prediction
                 prediction_indexes_to_delete.append(prediction_index)
+            else:
+                if rot_front_data.class_names[prediction_index] == "rot_front":
+                    # Save prediction index of rotational front
+                    prediction_dictionary["original_prediction_index"] = prediction_index
+                    self.rot_front_info_list.append(prediction_dictionary)
 
         for prediction_index in sorted(prediction_indexes_to_delete, reverse=True):
             # Delete prediction with no handler
@@ -170,10 +185,13 @@ class JointSegmentator:
 
         self.rot_front_data = rot_front_data
 
-    def merge_to_single_mask(self, data: HandlerPrediction, class_to_merge: str = None):
+    def merge_to_single_mask(self, data: HandlerPrediction,
+                             class_to_merge: str = None,
+                             class_to_distuinguish: str = "rot_front"):
         """
         Merge list of masks to one common mask
 
+        :param class_to_distuinguish: class for which you want to distuinguish bboxes
         :param class_to_merge: class to merge. For example create mask only from rotational fronts
         :param data: input class containing list of masks and list of class_names
         :return: one common mask
@@ -181,11 +199,15 @@ class JointSegmentator:
 
         single_mask = np.zeros((self.IMAGE_HEIGHT, self.IMAGE_WIDTH), dtype=np.uint8)
 
-        for mask, class_name in zip(data.masks, data.class_names):
+        for mask, class_name, box in zip(data.masks, data.class_names, data.boxes):
             if class_to_merge is not None:
                 if class_name != class_to_merge:
                     continue
             current_mask_cv2 = self.cv_bridge.imgmsg_to_cv2(mask, "mono8")
+            # Save rotational bounding boxes for later usage
+            if class_name == class_to_distuinguish:
+                self.rot_front_bboxes.append(box)
+
             single_mask += current_mask_cv2
 
         single_mask[single_mask >= 255] = 255  # prune the value to 255 if mask was greater than 255
@@ -207,6 +229,8 @@ class JointSegmentator:
         self.rot_front_data = None
         self.rot_front_mask = None
         self.header = None
+        self.rot_front_bboxes = []
+        self.rot_front_info_list = []
 
     def prepare_input_data(self):
         """
@@ -277,27 +301,119 @@ class JointSegmentator:
             coeffs_vertices = get_general_line_coeffs(vertice[0], vertice[1], vertice[2], vertice[3])
             grayscale_line_coeffs.append(coeffs_vertices)
 
-        # For each middle point from prediction get distance to each line and find index of closest one
+        # For each middle point from prediction get distance to each line from lines on found on grayscale image
+        # and find index of closest one
         closest_line_indexes = get_closest_lines_indexes(prediction_middle_points, grayscale_line_coeffs)
 
+        # Get rid of lines found on grayscale image that are not close to predicted ones
+        grayscale_line_coeffs_closest = [grayscale_line_coeffs[i]["general_coeffs"] for i in closest_line_indexes]
+        grayscale_vertices_closest = [grayscale_vertices[i] for i in closest_line_indexes]
+
+        # Attach each left joint to rotational front
+        joints_coeffs, joints_vertices, joint_front_indexes = self.attach_joint_to_front(grayscale_line_coeffs_closest,
+                                                                                         grayscale_vertices_closest)
+
+        # Publish visualization of joints
         if self.should_publish_visualization:
-            for line_index in closest_line_indexes:
-                vertices_to_draw = grayscale_vertices[line_index]
+            for vertices_to_draw in joints_vertices:
                 cv2.line(self.rgb_image, (vertices_to_draw[0], vertices_to_draw[1]),
                          (vertices_to_draw[2], vertices_to_draw[3]),
                          (0, 255, 255), 3)
-
             image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
             self.vis_pub.publish(image_msg)
 
-        self.publish_prediction(closest_line_indexes, grayscale_vertices)
+        self.publish_prediction(joints_vertices)
 
-    def publish_prediction(self, closest_line_indexes, vertices):
+    def remove_joints_without_fronts(self, indexes_to_keep, joint_coeffs, joint_vertices):
+        """
+        Creates joint coefficients and joint vertices lists based on indexes_to_keep
+
+        :param indexes_to_keep: list indexes of joints that should be left
+        :param joint_coeffs: input list of joint coefficients
+        :param joint_vertices: input list of joint vertices
+        :return: joint coefficients and joint vertices lists with indexes marked as indexes_to_stay
+        """
+
+        joint_coeffs_new = [joint_coeffs[i] for i in indexes_to_keep]
+        joint_vertices_new = [joint_vertices[i] for i in indexes_to_keep]
+
+        return joint_coeffs_new, joint_vertices_new
+
+    def attach_joint_to_front(self, joints_coeffs, joints_vertices, distance_threshold=15):
+        """
+        For each joint, function finds closest rotational front.
+         - If distance between joint and rotational front is greater than distance_threshold the joint is removed.
+         - If one rotational front has more than 1 predicted joint, the one with minimum distance will be kept. Other
+          will be removed
+        
+        :param distance_threshold: distance threshold in px to mark joint as correct
+        :param joints_coeffs: List of joints general line coefficients
+        :param joints_vertices: List of joints top and bottom vertices
+
+        :return joints_coeffs: List of joints general line coefficients that have attached fronts to it
+        :return joints_vertices: List of joints top and bottom vertices that have attached fronts to it
+        :return joint_front_indexes: List of fronts indexes from input prediction that corresponds to joints
+        """
+
+        joint_front_indexes = []  # Indexes of fronts corresponding to the joint
+        joint_front_distances = []  # Distances from joint to fronts
+        joint_indexes_to_keep = []  # Indexes of joints to keep
+
+        for joint_idx, joint in enumerate(joints_coeffs):
+            distances_to_fronts = []
+
+            # For each rotational front calculate which edge of front is rotational based on handler position and then
+            # calculate the distance between front and predicted joint
+            for rot_front_bbox, rot_front_info in zip(self.rot_front_bboxes, self.rot_front_info_list):
+                # Get bounding box of handler that is in rotational front
+                handler_mask_box = self.handler_data.boxes[rot_front_info["handler_index"]]
+                # Get point that lands on the middle of rotational edge of the front
+                front_edge_x, front_edge_y = get_point_on_opposite_edge_of_handler(rot_front_bbox, handler_mask_box)
+                # Calculate the distance between predicted joint and front
+                distance = get_point_line_distance(joint, (front_edge_x, front_edge_y))
+                distances_to_fronts.append(distance)
+
+            # Choose front with minimum distance
+            distance_to_front = np.min(distances_to_fronts)
+            closest_front = np.argmin(distances_to_fronts)
+
+            # Get rid of joints that are predicted way of closest rotational front
+            if distance_to_front > distance_threshold:
+                continue
+
+            # Save index of front from original front prediction that matches current joint
+            front_index = self.rot_front_info_list[closest_front]["original_prediction_index"]
+
+            # Check if current front has attached any joint to it
+            if front_index in joint_front_indexes:
+                idx = int(np.where(np.array(joint_front_indexes) == front_index)[0])
+                distance = joint_front_distances[idx]
+
+                # If it does, then overwrite the front's attached joint only if the new joint is closer than the
+                # previous one. If not skip the joint
+                if distance_to_front <= distance:
+                    joint_front_distances[idx] = distance
+                    joint_front_indexes[idx] = front_index
+                    joint_indexes_to_keep[idx] = joint_idx
+            # Save new joint to the new front
+            else:
+                joint_front_distances.append(distance_to_front)
+                joint_front_indexes.append(front_index)
+                joint_indexes_to_keep.append(joint_idx)
+
+        # Keep joint vertices and coefficients only if it has attached front to it
+        joints_coeffs, joints_vertices = self.remove_joints_without_fronts(joint_indexes_to_keep,
+                                                                           joints_coeffs,
+                                                                           joints_vertices)
+
+        return joints_coeffs, joints_vertices, joint_front_indexes
+
+    def publish_prediction(self, vertices):
         prediction_msg = JointPrediction()
         prediction_msg.header = self.header
 
-        for line_index in closest_line_indexes:
-            x1, y1, x2, y2 = vertices[line_index]
+        for vertice in vertices:
+            x1, y1, x2, y2 = vertice
             prediction_msg.x1.append(x1)
             prediction_msg.y1.append(y1)
             prediction_msg.x2.append(x2)
