@@ -21,13 +21,7 @@ def find_vertices_of_prediction_joints(prediction_edges, minimum_joint_predictio
             continue
 
         pts = contour.reshape(contour.shape[0], 2)
-        s = np.sum(pts, axis=1)
-        top_left = pts[np.argmin(s)]  # Top left corner has minimum sum
-        bottom_right = pts[np.argmax(s)]  # Bottom right corner has maximum sum
-
-        diff = np.diff(pts, axis=1)
-        top_right = pts[np.argmin(diff)]  # Top right has minimum difference
-        bottom_left = pts[np.argmax(diff)]  # Bottom left has maximum difference
+        top_left, bottom_left, top_right, bottom_right = find_corners_in_points(pts)
 
         # Find top and bottom vertice as averate of top right/left and bottom right/left
         x_top = int((top_left[0] + top_right[0]) / 2)
@@ -41,6 +35,18 @@ def find_vertices_of_prediction_joints(prediction_edges, minimum_joint_predictio
     return vertices_list
 
 
+def find_corners_in_points(pts: np.ndarray):
+    s = np.sum(pts, axis=1)
+    top_left = pts[np.argmin(s)]  # Top left corner has minimum sum
+    bottom_right = pts[np.argmax(s)]  # Bottom right corner has maximum sum
+
+    diff = np.diff(pts, axis=1)
+    top_right = pts[np.argmin(diff)]  # Top right has minimum difference
+    bottom_left = pts[np.argmax(diff)]  # Bottom left has maximum difference
+
+    return top_left, bottom_left, top_right, bottom_right
+
+
 def get_middle_point_of_lines(vertices_list):
     """
     Finds middle point of line
@@ -51,8 +57,7 @@ def get_middle_point_of_lines(vertices_list):
 
     line_middle_points = []
     for index, vertices in enumerate(vertices_list):
-        xm = int((vertices[0] + vertices[2]) / 2)
-        ym = int((vertices[1] + vertices[3]) / 2)
+        xm, ym = get_middle_point(vertices[0], vertices[1], vertices[2], vertices[3])
         line_middle = {"middle_point": (xm, ym), "vertices": vertices}
         line_middle_points.append(line_middle)
     return line_middle_points
@@ -117,3 +122,40 @@ def get_closest_lines_indexes(pred_middle_points, grayscale_lines_coeffs_vertice
         closest_lines_indexes.append(np.argmin(distances))
 
     return closest_lines_indexes
+
+
+def get_middle_point(x1, y1, x2, y2):
+    xm = int((x1 + x2) / 2)
+    ym = int((y1 + y2) / 2)
+
+    return xm, ym
+
+
+def point_to_point_distance(x1, y1, x2, y2):
+    distance = np.sqrt(((x1 - x2) ** 2) + ((y1 - y2) ** 2))
+    return distance
+
+
+def get_point_on_opposite_edge_of_handler(front_bbox: np.ndarray, handler_bbox):
+
+    handler_middle_pt_x = int(handler_bbox.x_offset + (handler_bbox.width / 2))
+    handler_middle_pt_y = int(handler_bbox.y_offset + (handler_bbox.height / 2))
+
+    # TODO: Try to get middle points of edges from masks not bboxes
+    front_left_middle_point_x = front_bbox.x_offset
+    front_left_middle_point_y = int(front_bbox.y_offset + (front_bbox.height / 2))
+
+    front_right_middle_point_x = front_bbox.x_offset + front_bbox.width
+    front_right_middle_point_y = int(front_bbox.y_offset + (front_bbox.height / 2))
+
+    # Calculate the distance from handler to left edge and from handler to right edge
+    left_distance = point_to_point_distance(front_left_middle_point_x, front_left_middle_point_y,
+                                            handler_middle_pt_x, handler_middle_pt_y)
+    right_distance = point_to_point_distance(front_right_middle_point_x,
+                                             front_right_middle_point_y, handler_middle_pt_x, handler_middle_pt_y)
+
+    # Based on the distance choose which front edge contains joint and return middle point of that edge
+    if right_distance > left_distance:
+        return front_right_middle_point_x, front_right_middle_point_y
+    else:
+        return front_left_middle_point_x, front_left_middle_point_y
