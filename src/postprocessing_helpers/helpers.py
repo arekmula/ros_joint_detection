@@ -125,7 +125,8 @@ def get_closest_lines_indexes(pred_middle_points, grayscale_lines_coeffs_vertice
             distance = get_point_line_distance(line_coeffs, middle_point)
             distances.append(distance)
 
-        closest_lines_indexes.append(np.argmin(distances))
+        if len(distances) > 0:
+            closest_lines_indexes.append(np.argmin(distances))
 
     return closest_lines_indexes
 
