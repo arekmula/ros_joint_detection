@@ -3,7 +3,6 @@
 # System imports
 import sys
 import threading
-from operator import itemgetter
 
 import cv2
 import numpy as np
@@ -88,10 +87,6 @@ class JointSegmentator:
         self.rot_front_bboxes = []  # List of bounding boxes of rotational fronts
         self.rot_front_info_list = []  # List of dictionaries corresponding to above bounding boxes lists. Each
         # dictionary have info about index of handler in rotational front and index of rotational front prediction
-
-        # Last input message and message lock
-        self.last_msg = None
-        self.msg_lock = threading.Lock()
 
         # Should publish visualization image
         self.should_publish_visualization = rospy.get_param("visualize_joint_prediction", True)
@@ -443,7 +438,6 @@ def main(args):
     rospy.init_node("joint_segmentation")
     if rospy.has_param("rgb_image_topic"):
         rgb_image_topic = rospy.get_param("rgb_image_topic")
-        print(rgb_image_topic)
 
     joint_segmentator = JointSegmentator(rgb_image_topic)
     rospy.spin()
