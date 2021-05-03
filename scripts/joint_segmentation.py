@@ -285,28 +285,20 @@ class JointSegmentator:
                                      threshold2=self.CANNY_THRESHOLD2)
         # Find vertices of prediction joints based on canny edge
         prediction_vertices = find_vertices_of_prediction_joints(prediction_edges)
-        # Find middle point of predicted joint
-        prediction_middle_points = get_middle_point_of_lines(prediction_vertices)
 
-        # Find vertices on grayscale img
-        grayscale_vertices = self.find_lines_on_grayscale_image()
-        # Find general line coeffs of grayscale lines
-        grayscale_line_coeffs = []
-        for vertice in grayscale_vertices:
+        # Find general line coeffs of predicted lines
+        prediction_line_coeffs_dicts = []
+        for vertice in prediction_vertices:
             coeffs_vertices = get_general_line_coeffs(vertice[0], vertice[1], vertice[2], vertice[3])
-            grayscale_line_coeffs.append(coeffs_vertices)
+            prediction_line_coeffs_dicts.append(coeffs_vertices)
 
-        # For each middle point from prediction get distance to each line from lines on found on grayscale image
-        # and find index of closest one
-        closest_line_indexes = get_closest_lines_indexes(prediction_middle_points, grayscale_line_coeffs)
-
-        # Get rid of lines found on grayscale image that are not close to predicted ones
-        grayscale_line_coeffs_closest = [grayscale_line_coeffs[i]["general_coeffs"] for i in closest_line_indexes]
-        grayscale_vertices_closest = [grayscale_vertices[i] for i in closest_line_indexes]
+        # Get list of prediction lines coefficients from predictions dictionaries
+        prediction_line_coeffs = [prediction_line_coeffs_dicts[i]["general_coeffs"]
+                                  for i in range(len(prediction_line_coeffs_dicts))]
 
         # Attach each left joint to rotational front
-        joints_coeffs, joints_vertices, joint_front_indexes = self.attach_joint_to_front(grayscale_line_coeffs_closest,
-                                                                                         grayscale_vertices_closest)
+        joints_coeffs, joints_vertices, joint_front_indexes = self.attach_joint_to_front(prediction_line_coeffs,
+                                                                                         prediction_vertices)
 
         # Publish visualization of joints
         if self.should_publish_visualization:
