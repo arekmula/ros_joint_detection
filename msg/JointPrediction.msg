@@ -10,3 +10,8 @@ int32[] y2
 
 # Corresponding front prediction index
 int32[] front_prediction_index
+
+# Joint prediction coefficients
+int32[] A
+int32[] B
+int32[] C

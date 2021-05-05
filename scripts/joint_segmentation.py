@@ -309,7 +309,7 @@ class JointSegmentator:
             image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
             self.vis_pub.publish(image_msg)
 
-        self.publish_prediction(joints_vertices, joint_front_indexes)
+        self.publish_prediction(joints_vertices, joints_coeffs, joint_front_indexes)
 
     def remove_joints_without_fronts(self, indexes_to_keep, joint_coeffs, joint_vertices):
         """
@@ -395,16 +395,21 @@ class JointSegmentator:
 
         return joints_coeffs, joints_vertices, joint_front_indexes
 
-    def publish_prediction(self, vertices, indexes):
+    def publish_prediction(self, vertices, coeffs, indexes):
         prediction_msg = JointPrediction()
         prediction_msg.header = self.header
 
-        for vertice in vertices:
+        for vertice, coeff in zip(vertices, coeffs):
             x1, y1, x2, y2 = vertice
+            A, B, C = coeff
             prediction_msg.x1.append(x1)
             prediction_msg.y1.append(y1)
             prediction_msg.x2.append(x2)
             prediction_msg.y2.append(y2)
+
+            prediction_msg.A.append(A)
+            prediction_msg.B.append(B)
+            prediction_msg.C.append(C)
 
         prediction_msg.front_prediction_index = indexes
 
