@@ -26,10 +26,10 @@ class JointSegmentator:
     DETECTION_THRESHOLD = 0.5
     IMAGE_WIDTH = 640
     IMAGE_HEIGHT = 480
-    INPUT_CHANNELS = 3
-    GRAYSCALE_CHANNEL = 0
-    HANDLER_CHANNEL = 1
-    ROT_FRONT_CHANNEL = 2
+    INPUT_CHANNELS = 5
+    RGB_CHANNELS_NUMBER = 3
+    HANDLER_CHANNEL = 3
+    ROT_FRONT_CHANNEL = 4
     CANNY_THRESHOLD1 = 47
     CANNY_THRESHOLD2 = 255
     HOUGH_THRESHOLD = 150
@@ -63,9 +63,9 @@ class JointSegmentator:
         # rgb and grayscale image
         rgb_sub = rospy.Subscriber(self.rgb_image_topic, data_class=Image, callback=self.rgb_image_callback,
                                    queue_size=1, buff_size=2 ** 24)
-        self.grayscale_image = None
         self.grayscale_image_cv2 = None
         self.rgb_image = None
+        self.rgb_image_model_input = None
         self.header = None
 
         # handler mask
@@ -96,11 +96,13 @@ class JointSegmentator:
     def rgb_image_callback(self, data):
         rospy.logdebug("Get input image")
 
-        if self.grayscale_image is None:
+        if self.rgb_image_model_input is None:
             self.header = data.header
             self.rgb_image = self.cv_bridge.imgmsg_to_cv2(data, "bgr8")
-            self.grayscale_image_cv2 = cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2GRAY)
-            self.grayscale_image = self.grayscale_image_cv2.astype(np.float32) / 255
+            self.rgb_image_model_input = np.copy(self.rgb_image)
+            self.rgb_image_model_input = cv2.cvtColor(self.rgb_image_model_input, cv2.COLOR_BGR2RGB)
+
+            self.grayscale_image_cv2 = cv2.cvtColor(np.copy(self.rgb_image), cv2.COLOR_BGR2GRAY)
 
             if self.are_all_inputs_ready():
                 self.delete_rot_front_without_handler()
@@ -209,7 +211,7 @@ class JointSegmentator:
         return single_mask
 
     def are_all_inputs_ready(self):
-        if (self.grayscale_image is not None) and \
+        if (self.rgb_image_model_input is not None) and \
                 (self.handler_data is not None) and \
                 (self.rot_front_data is not None):
             return True
@@ -217,7 +219,7 @@ class JointSegmentator:
             return False
 
     def reset_all_inputs(self):
-        self.grayscale_image = None
+        self.rgb_image_model_input = None
         self.grayscale_image_cv2 = None
         self.handler_data = None
         self.handler_mask = None
@@ -230,7 +232,7 @@ class JointSegmentator:
     def prepare_input_data(self):
         """
         Prepares input data for model. Channels order based on model training:
-        1) Grayscale image
+        1) RGB image
         2) Handler mask
         3) Rotational front mask
 
@@ -242,9 +244,10 @@ class JointSegmentator:
         handler_mask = self.merge_to_single_mask(self.handler_data)
         self.handler_mask = handler_mask.astype(np.float32) / 255
 
-        input_data = np.empty((self.IMAGE_HEIGHT, self.IMAGE_WIDTH, self.INPUT_CHANNELS), dtype=np.float32)
+        self.rgb_image_model_input = self.rgb_image_model_input.astype(np.float32) / 255
 
-        input_data[:, :, self.GRAYSCALE_CHANNEL] = self.grayscale_image
+        input_data = np.empty((self.IMAGE_HEIGHT, self.IMAGE_WIDTH, self.INPUT_CHANNELS), dtype=np.float32)
+        input_data[:, :, :self.RGB_CHANNELS_NUMBER] = self.rgb_image_model_input
         input_data[:, :, self.HANDLER_CHANNEL] = self.handler_mask
         input_data[:, :, self.ROT_FRONT_CHANNEL] = self.rot_front_mask
 
@@ -284,29 +287,23 @@ class JointSegmentator:
         prediction_edges = cv2.Canny(prediction_mask, threshold1=self.CANNY_THRESHOLD1,
                                      threshold2=self.CANNY_THRESHOLD2)
         # Find vertices of prediction joints based on canny edge
-        prediction_vertices = find_vertices_of_prediction_joints(prediction_edges)
-        # Find middle point of predicted joint
-        prediction_middle_points = get_middle_point_of_lines(prediction_vertices)
+        prediction_vertices = find_vertices_of_prediction_joints(prediction_edges,
+                                                                 minimum_joint_prediction_height=50)
 
-        # Find vertices on grayscale img
-        grayscale_vertices = self.find_lines_on_grayscale_image()
-        # Find general line coeffs of grayscale lines
-        grayscale_line_coeffs = []
-        for vertice in grayscale_vertices:
+        # Find general line coeffs of predicted lines
+        prediction_line_coeffs_dicts = []
+        for vertice in prediction_vertices:
             coeffs_vertices = get_general_line_coeffs(vertice[0], vertice[1], vertice[2], vertice[3])
-            grayscale_line_coeffs.append(coeffs_vertices)
+            prediction_line_coeffs_dicts.append(coeffs_vertices)
 
-        # For each middle point from prediction get distance to each line from lines on found on grayscale image
-        # and find index of closest one
-        closest_line_indexes = get_closest_lines_indexes(prediction_middle_points, grayscale_line_coeffs)
-
-        # Get rid of lines found on grayscale image that are not close to predicted ones
-        grayscale_line_coeffs_closest = [grayscale_line_coeffs[i]["general_coeffs"] for i in closest_line_indexes]
-        grayscale_vertices_closest = [grayscale_vertices[i] for i in closest_line_indexes]
+        # Get list of prediction lines coefficients from predictions dictionaries
+        prediction_line_coeffs = [prediction_line_coeffs_dicts[i]["general_coeffs"]
+                                  for i in range(len(prediction_line_coeffs_dicts))]
 
         # Attach each left joint to rotational front
-        joints_coeffs, joints_vertices, joint_front_indexes = self.attach_joint_to_front(grayscale_line_coeffs_closest,
-                                                                                         grayscale_vertices_closest)
+        joints_coeffs, joints_vertices, joint_front_indexes = self.attach_joint_to_front(prediction_line_coeffs,
+                                                                                         prediction_vertices,
+                                                                                         distance_threshold=35)
 
         # Publish visualization of joints
         if self.should_publish_visualization:
@@ -317,7 +314,7 @@ class JointSegmentator:
             image_msg = self.cv_bridge.cv2_to_imgmsg(self.rgb_image, encoding="bgr8")
             self.vis_pub.publish(image_msg)
 
-        self.publish_prediction(joints_vertices, joint_front_indexes)
+        self.publish_prediction(joints_vertices, joints_coeffs, joint_front_indexes)
 
     def remove_joints_without_fronts(self, indexes_to_keep, joint_coeffs, joint_vertices):
         """
@@ -369,6 +366,8 @@ class JointSegmentator:
                 distances_to_fronts.append(distance)
 
             # Choose front with minimum distance
+            if len(distances_to_fronts) == 0:
+                continue
             distance_to_front = np.min(distances_to_fronts)
             closest_front = np.argmin(distances_to_fronts)
 
@@ -403,16 +402,21 @@ class JointSegmentator:
 
         return joints_coeffs, joints_vertices, joint_front_indexes
 
-    def publish_prediction(self, vertices, indexes):
+    def publish_prediction(self, vertices, coeffs, indexes):
         prediction_msg = JointPrediction()
         prediction_msg.header = self.header
 
-        for vertice in vertices:
+        for vertice, coeff in zip(vertices, coeffs):
             x1, y1, x2, y2 = vertice
+            A, B, C = coeff
             prediction_msg.x1.append(x1)
             prediction_msg.y1.append(y1)
             prediction_msg.x2.append(x2)
             prediction_msg.y2.append(y2)
+
+            prediction_msg.A.append(A)
+            prediction_msg.B.append(B)
+            prediction_msg.C.append(C)
 
         prediction_msg.front_prediction_index = indexes
 
