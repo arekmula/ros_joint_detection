@@ -1,4 +1,40 @@
-# ros_joint_segmentation
+# ros_joint_detector
+<p align="center">
+  <img alt="1" src="imgs/joint1.png" width="30%">
+&nbsp; &nbsp; &nbsp; &nbsp;
+  <img alt="2" src="imgs/joint2.png" width="30%">
+&nbsp; &nbsp; &nbsp; &nbsp;
+  <img alt="2" src="imgs/joint3.png" width="30%">
+</p>
+
+The goal of the project is to build a ROS node that would be responsible for detecting rotational joints. The module uses a neural network to perform the task and utilizes U-Net architecture with EfficientNetB0 working as a backend. 
+ 
+This module is part of my master thesis "Point cloud-based model of the scene enhanced with information about articulated
+objects" and **requires** two other modules to work properly:
+- [Handler detector](https://github.com/arekmula/ros_handler_detector)
+- [Front detector](https://github.com/arekmula/ros_front_detection_segmentation)
+
+The third module [Articulated objects scene builder](https://github.com/arekmula/articulated_objects_scene_builder) utilize results of the rest of the modules to find articulated objects in a 3D environment.
+
+## How it works
+<p align="center">
+  <img alt="1" src="imgs/input1.jpg" width="30%">
+&nbsp; &nbsp; &nbsp; &nbsp;
+  <img alt="2" src="imgs/input2.jpg" width="30%">
+&nbsp; &nbsp; &nbsp; &nbsp;
+  <img alt="2" src="imgs/input5.jpg" width="30%">
+</p>
+
+The module utilizes the results of the handler detection module as well as the front detection module to prepare input for the neural network. The input of the network has 5 channels:
+- RGB image
+- Handlers mask
+- Rotational fronts mask
+
+The prediction results are then post-processed to get rid of false positive predictions and to attach a rotational joint to a rotational object.
+
+## Results
+- Accuracy: **61.02 %**
+- False positive rate: **3.54 %**
 
 
 ## Dependencies
