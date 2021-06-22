@@ -1,4 +1,4 @@
-# ros_joint_detector
+# ros_joint_detection
 <p align="center">
   <img alt="1" src="imgs/joint1.png" width="30%">
 &nbsp; &nbsp; &nbsp; &nbsp;
@@ -7,7 +7,8 @@
   <img alt="2" src="imgs/joint3.png" width="30%">
 </p>
 
-The goal of the project is to build a ROS node that would be responsible for detecting rotational joints. The module uses a neural network to perform the task and utilizes U-Net architecture with EfficientNetB0 working as a backend. 
+The goal of the project is to build a ROS node that would be responsible for detecting rotational joints. The module uses a neural network to perform the task and utilizes U-Net architecture with EfficientNetB0 working as a backend. The dataset used for training, evaluation, and testing the neural network is available [here](https://drive.google.com/file/d/160CKfbddk_ybkPeXA4BYQz2h6cS6Zjz9/view?usp=sharing).
+
  
 This module is part of my master thesis "Point cloud-based model of the scene enhanced with information about articulated
 objects" and **requires** two other modules to work properly:
